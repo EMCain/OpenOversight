@@ -1,25 +1,26 @@
 # Routing and view tests
+import csv
+import copy
 import json
 import pytest
 import random
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 from mock import patch, MagicMock
 from flask import url_for, current_app
-from ..conftest import AC_DEPT
-from OpenOversight.app.utils import dept_choices
+from ..conftest import AC_DEPT, RANK_CHOICES_1
+from OpenOversight.app.utils import add_new_assignment, dept_choices, unit_choices
 from OpenOversight.app.main.choices import RACE_CHOICES, GENDER_CHOICES
 from .route_helpers import login_user, login_admin, login_ac, process_form_data
-
 
 from OpenOversight.app.main.forms import (AssignmentForm, DepartmentForm,
                                           AddOfficerForm, AddUnitForm,
                                           EditOfficerForm, LinkForm,
                                           EditDepartmentForm, SalaryForm,
                                           LocationForm, BrowseForm, LicensePlateForm,
-                                          IncidentForm)
+                                          IncidentForm, OfficerLinkForm)
 
-from OpenOversight.app.models import Department, Unit, Officer, Assignment, Salary, Image, Incident, Job
+from OpenOversight.app.models import Department, Unit, Officer, Assignment, Salary, Image, Incident, Job, User
 
 
 @pytest.mark.parametrize("route", [
@@ -98,13 +99,18 @@ def test_ac_cannot_access_admin_on_non_dept_officer_profile(mockdata, client, se
         assert 'Admin only' not in rv.data.decode('utf-8')
 
 
-def test_admin_can_add_officer_badge_number(mockdata, client, session):
+def test_admin_can_add_assignment(mockdata, client, session):
     with current_app.test_request_context():
         login_admin(client)
 
         officer = Officer.query.filter_by(id=3).one()
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
-        form = AssignmentForm(star_no='1234', job_title=job.id)
+        form = AssignmentForm(
+            star_no='1234',
+            job_title=job.id,
+            star_date=date(2019, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
 
         rv = client.post(
             url_for('main.add_assignment', officer_id=3),
@@ -113,15 +119,48 @@ def test_admin_can_add_officer_badge_number(mockdata, client, session):
         )
 
         assert 'Added new assignment' in rv.data.decode('utf-8')
+        assert '2019-01-01' in rv.data.decode('utf-8')
+        assert '2019-12-31' in rv.data.decode('utf-8')
+        assignment = Assignment.query.filter_by(
+            star_no='1234', job_id=job.id).first()
+        assert assignment.star_date == date(2019, 1, 1)
+        assert assignment.resign_date == date(2019, 12, 31)
 
 
-def test_ac_can_add_officer_badge_number_in_their_dept(mockdata, client, session):
+def test_admin_add_assignment_validation_error(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        officer = Officer.query.filter_by(id=3).one()
+        job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
+        form = AssignmentForm(
+            star_no='1234',
+            job_title=job.id,
+            star_date=date(2020, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
+
+        rv = client.post(
+            url_for('main.add_assignment', officer_id=3),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert "End date must come after start date." in rv.data.decode('utf-8')
+        assignments = Assignment.query.filter_by(star_no='1234', job_id=job.id).scalar()
+        assert assignments is None
+
+
+def test_ac_can_add_assignment_in_their_dept(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
-
         officer = Officer.query.filter_by(department_id=AC_DEPT).first()
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
-        form = AssignmentForm(star_no='S1234', job_title=job.id)
+        form = AssignmentForm(
+            star_no='S1234',
+            job_title=job.id,
+            star_date=date(2019, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
 
         rv = client.post(
             url_for('main.add_assignment', officer_id=officer.id),
@@ -130,13 +169,17 @@ def test_ac_can_add_officer_badge_number_in_their_dept(mockdata, client, session
         )
 
         assert 'Added new assignment' in rv.data.decode('utf-8')
+        assert '2019-01-01' in rv.data.decode('utf-8')
+        assert '2019-12-31' in rv.data.decode('utf-8')
 
         # test that assignment exists in database
-        officer = Officer.query.filter(Officer.assignments.any(star_no='S1234')).first()
-        assert officer is not None
+        assignment = Assignment.query.filter_by(
+            star_no='S1234', officer_id=officer.id).first()
+        assert assignment.star_date == date(2019, 1, 1)
+        assert assignment.resign_date == date(2019, 12, 31)
 
 
-def test_ac_cannot_add_non_dept_officer_badge(mockdata, client, session):
+def test_ac_cannot_add_non_dept_assignment(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
 
@@ -151,17 +194,23 @@ def test_ac_cannot_add_non_dept_officer_badge(mockdata, client, session):
         )
 
         assert rv.status_code == 403
+        assignments = Assignment.query.filter_by(
+            star_no='1234', job_id=job.id).scalar()
+        assert assignments is None
 
 
-def test_admin_can_edit_officer_badge_number(mockdata, client, session):
+def test_admin_can_edit_assignment(mockdata, client, session):
     with current_app.test_request_context():
         login_admin(client)
 
-        # Remove existing assignments
-        Assignment.query.filter_by(officer_id=3).delete()
         officer = Officer.query.filter_by(id=3).one()
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
-        form = AssignmentForm(star_no='1234', job_title=job.id)
+        form = AssignmentForm(
+            star_no='1234',
+            job_title=job.id,
+            star_date=date(2019, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
 
         rv = client.post(
             url_for('main.add_assignment', officer_id=3),
@@ -171,9 +220,20 @@ def test_admin_can_edit_officer_badge_number(mockdata, client, session):
 
         assert 'Added new assignment' in rv.data.decode('utf-8')
         assert '<td>1234</td>' in rv.data.decode('utf-8')
+        assert '2019-01-01' in rv.data.decode('utf-8')
+        assert '2019-12-31' in rv.data.decode('utf-8')
+
+        assignment = Assignment.query.filter_by(star_no='1234', job_id=job.id).first()
+        assert assignment.star_date == date(2019, 1, 1)
+        assert assignment.resign_date == date(2019, 12, 31)
 
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Commander').one()
-        form = AssignmentForm(star_no='12345', job_title=job.id)
+        form = AssignmentForm(
+            star_no='12345',
+            job_title=job.id,
+            star_date=date(2019, 2, 1),
+            resign_date=date(2019, 11, 30)
+        )
         officer = Officer.query.filter_by(id=3).one()
 
         rv = client.post(
@@ -185,10 +245,53 @@ def test_admin_can_edit_officer_badge_number(mockdata, client, session):
 
         assert 'Edited officer assignment' in rv.data.decode('utf-8')
         assert '<td>12345</td>' in rv.data.decode('utf-8')
-        assert officer.assignments[0].star_no == '12345'
+        assert '2019-02-01' in rv.data.decode('utf-8')
+        assert '2019-11-30' in rv.data.decode('utf-8')
+
+        assignment = Assignment.query.filter_by(star_no='12345', job_id=job.id).first()
+        assert assignment.star_date == date(2019, 2, 1)
+        assert assignment.resign_date == date(2019, 11, 30)
 
 
-def test_ac_can_edit_officer_in_their_dept_badge_number(mockdata, client, session):
+def test_admin_edit_assignment_validation_error(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        # Remove existing assignments
+        officer = Officer.query.filter_by(id=3).one()
+        job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
+        form = AssignmentForm(
+            star_no='1234',
+            job_title=job.id,
+            star_date=date(2019, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
+
+        rv = client.post(
+            url_for('main.add_assignment', officer_id=3),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        # Attempt to set resign date to a date before the start date
+        form = AssignmentForm(
+            resign_date=date(2018, 12, 31)
+        )
+        officer = Officer.query.filter_by(id=3).one()
+
+        rv = client.post(
+            url_for('main.edit_assignment', officer_id=officer.id,
+                    assignment_id=officer.assignments[0].id),
+            data=form.data,
+            follow_redirects=True
+        )
+        assignment = Assignment.query.filter_by(star_no='1234', job_id=job.id).first()
+        assert "End date must come after start date." in rv.data.decode('utf-8')
+        assert assignment.star_date == date(2019, 1, 1)
+        assert assignment.resign_date == date(2019, 12, 31)
+
+
+def test_ac_can_edit_officer_in_their_dept_assignment(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
 
@@ -196,7 +299,12 @@ def test_ac_can_edit_officer_in_their_dept_badge_number(mockdata, client, sessio
         new_star_no = '12345'
         officer = Officer.query.filter_by(department_id=AC_DEPT).first()
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Police Officer').one()
-        form = AssignmentForm(star_no=star_no, job_title=job.id)
+        form = AssignmentForm(
+            star_no=star_no,
+            job_title=job.id,
+            star_date=date(2019, 1, 1),
+            resign_date=date(2019, 12, 31),
+        )
 
         # Remove existing assignments
         Assignment.query.filter_by(officer_id=officer.id).delete()
@@ -208,10 +316,20 @@ def test_ac_can_edit_officer_in_their_dept_badge_number(mockdata, client, sessio
         )
         assert 'Added new assignment' in rv.data.decode('utf-8')
         assert '<td>{}</td>'.format(star_no) in rv.data.decode('utf-8')
+        assert '2019-01-01' in rv.data.decode('utf-8')
+        assert '2019-12-31' in rv.data.decode('utf-8')
+        assert officer.assignments[0].star_no == star_no
+        assert officer.assignments[0].star_date == date(2019, 1, 1)
+        assert officer.assignments[0].resign_date == date(2019, 12, 31)
 
         officer = Officer.query.filter_by(id=officer.id).one()
         job = Job.query.filter_by(department_id=officer.department_id, job_title='Commander').one()
-        form = AssignmentForm(star_no=new_star_no, job_title=job.id)
+        form = AssignmentForm(
+            star_no=new_star_no,
+            job_title=job.id,
+            star_date=date(2019, 2, 1),
+            resign_date=date(2019, 11, 30),
+        )
 
         rv = client.post(
             url_for('main.edit_assignment', officer_id=officer.id,
@@ -222,10 +340,14 @@ def test_ac_can_edit_officer_in_their_dept_badge_number(mockdata, client, sessio
 
         assert 'Edited officer assignment' in rv.data.decode('utf-8')
         assert '<td>{}</td>'.format(new_star_no) in rv.data.decode('utf-8')
+        assert '2019-02-01' in rv.data.decode('utf-8')
+        assert '2019-11-30' in rv.data.decode('utf-8')
         assert officer.assignments[0].star_no == new_star_no
+        assert officer.assignments[0].star_date == date(2019, 2, 1)
+        assert officer.assignments[0].resign_date == date(2019, 11, 30)
 
 
-def test_ac_cannot_edit_officer_outside_their_dept_badge_number(mockdata, client, session):
+def test_ac_cannot_edit_assignment_outside_their_dept(mockdata, client, session):
     with current_app.test_request_context():
         login_admin(client)
 
@@ -403,8 +525,174 @@ def test_ac_cannot_edit_police_department(mockdata, client, session):
         assert rv.status_code == 403
 
 
-def test_admin_cannot_duplicate_police_department_during_edit(mockdata, client,
-                                                              session):
+def test_admin_can_edit_rank_order(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        ranks = Department.query.filter_by(name='Springfield Police Department').one().jobs
+        ranks_update = ranks.copy()
+        original_first_rank = copy.deepcopy(ranks_update[0])
+        ranks_update[0], ranks_update[1] = ranks_update[1], ranks_update[0]
+        ranks_stringified = [rank.job_title for rank in ranks_update]
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_stringified)
+        processed_data = process_form_data(rank_change_form.data)
+
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        updated_ranks = Department.query.filter_by(name='Springfield Police Department').one().jobs
+        assert 'Department Springfield Police Department edited' in rv.data.decode('utf-8')
+        assert updated_ranks[0].job_title == original_first_rank.job_title and updated_ranks[0].order != original_first_rank.order
+
+
+def test_admin_cannot_delete_rank_in_use(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        ranks = Department.query.filter_by(name='Springfield Police Department').one().jobs
+        original_ranks = ranks.copy()
+        ranks_update = RANK_CHOICES_1.copy()[:-1]
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        result = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        updated_ranks = Department.query.filter_by(name='Springfield Police Department').one().jobs
+        assert 'You attempted to delete a rank, Commander, that is in use' in result.data.decode('utf-8')
+        assert len(updated_ranks) == len(original_ranks)
+
+
+def test_admin_can_delete_rank_not_in_use(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        ranks_update = RANK_CHOICES_1.copy()
+        original_ranks_length = len(ranks_update)
+        ranks_update.append(Job(job_title='Temporary Rank',
+                                order=original_ranks_length,
+                                is_sworn_officer=True,
+                                department_id=1))
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # add a new rank
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length + 1
+
+        ranks_update = [job.job_title for job in Department.query.filter_by(name='Springfield Police Department').one().jobs]
+        ranks_update = ranks_update[:-1]
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # delete the rank that was added
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length
+
+
+def test_admin_can_delete_multiple_ranks_not_in_use(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        ranks_update = RANK_CHOICES_1.copy()
+        original_ranks_length = len(ranks_update)
+        ranks_update.append('Temporary Rank 1')
+        ranks_update.append('Temporary Rank 2')
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # add a new rank
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length + 2
+
+        ranks_update = [job.job_title for job in Department.query.filter_by(name='Springfield Police Department').one().jobs]
+        ranks_update = ranks_update[:-2]
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # delete the rank that was added
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length
+
+
+def test_admin_cannot_commit_edit_that_deletes_one_rank_in_use_and_one_not_in_use_rank(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+
+        ranks_update = RANK_CHOICES_1.copy()
+        original_ranks_length = len(ranks_update)
+        ranks_update.append(Job(job_title='Temporary Rank',
+                                order=original_ranks_length,
+                                is_sworn_officer=True,
+                                department_id=1))
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # add a new rank
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length + 1
+
+        # attempt to delete multiple ranks
+        ranks_update = [job.job_title for job in Department.query.filter_by(name='Springfield Police Department').one().jobs]
+        ranks_update = ranks_update[:-2]
+
+        rank_change_form = EditDepartmentForm(name='Springfield Police Department', short_name='SPD', jobs=ranks_update)
+        processed_data = process_form_data(rank_change_form.data)
+
+        # attempt to delete one rank in use and one rank not in use
+        rv = client.post(
+            url_for('main.edit_department', department_id=1),
+            data=processed_data,
+            follow_redirects=True
+        )
+
+        assert len(Department.query.filter_by(name='Springfield Police Department').one().jobs) == original_ranks_length + 1
+
+
+def test_admin_cannot_duplicate_police_department_during_edit(mockdata, client, session):
     with current_app.test_request_context():
         login_admin(client)
 
@@ -483,7 +771,7 @@ def test_admin_can_add_new_officer(mockdata, client, session):
                               race='WHITE',
                               gender='M',
                               star_no=666,
-                              job_title=job.id,
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990,
                               links=links)
@@ -506,6 +794,47 @@ def test_admin_can_add_new_officer(mockdata, client, session):
         assert officer.gender == 'M'
 
 
+def test_admin_can_add_new_officer_with_unit(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        department = random.choice(dept_choices())
+        unit = random.choice(unit_choices())
+        links = [
+            LinkForm(url='http://www.pleasework.com', link_type='link').data,
+            LinkForm(url='http://www.avideo/?v=2345jk', link_type='video').data
+        ]
+        job = Job.query.filter_by(department_id=department.id).first()
+        form = AddOfficerForm(first_name='Test',
+                              last_name='McTesterson',
+                              middle_initial='T',
+                              race='WHITE',
+                              gender='M',
+                              star_no=666,
+                              job_id=job.id,
+                              unit=unit.id,
+                              department=department.id,
+                              birth_year=1990,
+                              links=links)
+
+        data = process_form_data(form.data)
+
+        rv = client.post(
+            url_for('main.add_officer'),
+            data=data,
+            follow_redirects=True
+        )
+
+        assert 'New Officer McTesterson added' in rv.data.decode('utf-8')
+
+        # Check the officer was added to the database
+        officer = Officer.query.filter_by(
+            last_name='McTesterson').one()
+        assert officer.first_name == 'Test'
+        assert officer.race == 'WHITE'
+        assert officer.gender == 'M'
+        assert Assignment.query.filter_by(baseofficer=officer, unit=unit).one()
+
+
 def test_ac_can_add_new_officer_in_their_dept(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
@@ -522,7 +851,7 @@ def test_ac_can_add_new_officer_in_their_dept(mockdata, client, session):
                               race=race,
                               gender=gender,
                               star_no=666,
-                              job_title=job.id,
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990)
 
@@ -545,6 +874,48 @@ def test_ac_can_add_new_officer_in_their_dept(mockdata, client, session):
         assert officer.gender == gender
 
 
+def test_ac_can_add_new_officer_with_unit_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_ac(client)
+        department = Department.query.filter_by(id=AC_DEPT).first()
+        unit = random.choice(unit_choices(department_id=department.id))
+        first_name = 'Testy'
+        last_name = 'OTester'
+        middle_initial = 'R'
+        race = random.choice(RACE_CHOICES)[0]
+        gender = random.choice(GENDER_CHOICES)[0]
+        job = Job.query.filter_by(department_id=department.id).first()
+        form = AddOfficerForm(first_name=first_name,
+                              last_name=last_name,
+                              middle_initial=middle_initial,
+                              race=race,
+                              gender=gender,
+                              star_no=666,
+                              job_id=job.id,
+                              department=department.id,
+                              unit=unit.id,
+                              birth_year=1990)
+
+        data = process_form_data(form.data)
+
+        rv = client.post(
+            url_for('main.add_officer'),
+            data=data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 200
+        assert 'New Officer {} added'.format(last_name) in rv.data.decode('utf-8')
+
+        # Check the officer was added to the database
+        officer = Officer.query.filter_by(
+            last_name=last_name).one()
+        assert officer.first_name == first_name
+        assert officer.race == race
+        assert officer.gender == gender
+        assert Assignment.query.filter_by(baseofficer=officer, unit=unit).one()
+
+
 def test_ac_cannot_add_new_officer_not_in_their_dept(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
@@ -561,7 +932,7 @@ def test_ac_cannot_add_new_officer_not_in_their_dept(mockdata, client, session):
                               race=race,
                               gender=gender,
                               star_no=666,
-                              job_title=job.id,
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990)
 
@@ -581,6 +952,7 @@ def test_admin_can_edit_existing_officer(mockdata, client, session):
     with current_app.test_request_context():
         login_admin(client)
         department = random.choice(dept_choices())
+        unit = random.choice(unit_choices())
         link_url0 = 'http://pleasework.com'
         link_url1 = 'http://avideo/?v=2345jk'
         links = [
@@ -594,8 +966,9 @@ def test_admin_can_edit_existing_officer(mockdata, client, session):
                               race='WHITE',
                               gender='M',
                               star_no=666,
-                              job_title=job.id,
+                              job_id=job.id,
                               department=department.id,
+                              unit=unit.id,
                               birth_year=1990,
                               links=links)
         data = process_form_data(form.data)
@@ -670,12 +1043,14 @@ def test_ac_can_edit_officer_in_their_dept(mockdata, client, session):
     with current_app.test_request_context():
         login_ac(client)
         department = Department.query.filter_by(id=AC_DEPT).first()
+        unit = random.choice(unit_choices(department.id))
         first_name = 'Testier'
         last_name = 'OTester'
         middle_initial = 'R'
         suffix = ''
         race = random.choice(RACE_CHOICES)[0]
         gender = random.choice(GENDER_CHOICES)[0]
+        job = Job.query.filter_by(department_id=department.id).first()
         form = AddOfficerForm(first_name=first_name,
                               last_name=last_name,
                               middle_initial=middle_initial,
@@ -683,8 +1058,9 @@ def test_ac_can_edit_officer_in_their_dept(mockdata, client, session):
                               race=race,
                               gender=gender,
                               star_no=666,
-                              job_title='COMMANDER',
+                              job_id=job.id,
                               department=department.id,
+                              unit=unit.id,
                               birth_year=1990)
 
         data = process_form_data(form.data)
@@ -729,12 +1105,13 @@ def test_admin_adds_officer_without_middle_initial(mockdata, client, session):
         login_admin(client)
 
         department = random.choice(dept_choices())
+        job = Job.query.filter_by(department_id=department.id).first()
         form = AddOfficerForm(first_name='Test',
                               last_name='McTesty',
                               race='WHITE',
                               gender='M',
                               star_no=666,
-                              job_title='COMMANDER',
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990)
         data = process_form_data(form.data)
@@ -761,13 +1138,14 @@ def test_admin_adds_officer_with_letter_in_badge_no(mockdata, client, session):
         login_admin(client)
 
         department = random.choice(dept_choices())
+        job = Job.query.filter_by(department_id=department.id).first()
         form = AddOfficerForm(first_name='Test',
                               last_name='Testersly',
                               middle_initial='T',
                               race='WHITE',
                               gender='M',
                               star_no='T666',
-                              job_title='COMMANDER',
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990)
         data = process_form_data(form.data)
@@ -860,6 +1238,7 @@ def test_admin_can_add_new_officer_with_suffix(mockdata, client, session):
             LinkForm(url='http://www.pleasework.com', link_type='link').data,
             LinkForm(url='http://www.avideo/?v=2345jk', link_type='video').data
         ]
+        job = Job.query.filter_by(department_id=department.id).first()
         form = AddOfficerForm(first_name='Testy',
                               last_name='McTesty',
                               middle_initial='T',
@@ -867,7 +1246,7 @@ def test_admin_can_add_new_officer_with_suffix(mockdata, client, session):
                               race='WHITE',
                               gender='M',
                               star_no=666,
-                              job_title='COMMANDER',
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1990,
                               links=links)
@@ -908,14 +1287,15 @@ def test_officer_csv(mockdata, client, session):
         links = [
             LinkForm(url='http://www.pleasework.com', link_type='link').data,
         ]
+        job = Job.query.filter_by(department_id=department.id).filter(Job.job_title != 'Not Sure').first()
         form = AddOfficerForm(first_name='CKtVwe2gqhAIc',
                               last_name='FVkcjigWUeUyA',
                               middle_initial='T',
                               suffix='Jr',
                               race='WHITE',
                               gender='M',
-                              star_no=90009,
-                              job_title='PO',
+                              star_no='90009',
+                              job_id=job.id,
                               department=department.id,
                               birth_year=1910,
                               links=links)
@@ -925,20 +1305,52 @@ def test_officer_csv(mockdata, client, session):
             data=process_form_data(form.data),
             follow_redirects=True
         )
-
         assert 'New Officer FVkcjigWUeUyA added' in rv.data.decode('utf-8')
 
         # dump officer csv
         rv = client.get(
-            url_for('main.download_dept_csv', department_id=department.id),
+            url_for('main.download_dept_officers_csv', department_id=department.id),
             follow_redirects=True
         )
-        # get csv entry matching officer last n"createdame
-        csv = list(filter(lambda row: form.last_name.data in row, rv.data.decode('utf-8').split("\n")))
-        assert len(csv) == 1
-        assert form.first_name.data in csv[0]
-        assert form.last_name.data in csv[0]
-        assert form.job_title.data in csv[0]
+
+        csv_data = rv.data.decode('utf-8')
+        csv_reader = csv.DictReader(csv_data.split("\n"))
+        added_lines = [row for row in csv_reader if row["last name"] == form.last_name.data]
+        assert len(added_lines) == 1
+        assert form.first_name.data == added_lines[0]["first name"]
+        assert job.job_title == added_lines[0]["job title"]
+        assert form.star_no.data == added_lines[0]["badge number"]
+
+
+def test_assignments_csv(mockdata, client, session):
+    with current_app.test_request_context():
+        department = random.choice(dept_choices())
+        officer = Officer.query.filter_by(department_id=department.id).first()
+        job = (
+            Job
+            .query
+            .filter_by(department_id=department.id)
+            .filter(Job.job_title != "Not Sure")
+            .first())
+        form = AssignmentForm(star_no='9181', job_title=job, star_date=date(2020, 6, 16))
+        add_new_assignment(officer.id, form)
+        rv = client.get(
+            url_for('main.download_dept_assignments_csv', department_id=department.id),
+            follow_redirects=True
+        )
+        csv_data = rv.data.decode('utf-8')
+        csv_reader = csv.DictReader(csv_data.split("\n"))
+        all_rows = [row for row in csv_reader]
+        for row in all_rows:
+            assert Officer.query.get(int(row["officer id"])).department_id == department.id
+        lines = [row for row in all_rows if int(row["officer id"]) == officer.id]
+        assert len(lines) == 2
+        assert lines[0]["officer unique identifier"] == officer.unique_internal_identifier
+        assert lines[1]["officer unique identifier"] == officer.unique_internal_identifier
+        new_assignment = [row for row in lines if row["badge number"] == form.star_no.data]
+        assert len(new_assignment) == 1
+        assert new_assignment[0]["start date"] == str(form.star_date.data)
+        assert new_assignment[0]["job title"] == job.job_title
 
 
 def test_incidents_csv(mockdata, client, session):
@@ -1047,14 +1459,13 @@ def test_browse_filtering_allows_good(client, mockdata, session):
         ]
         officer = Officer.query.filter_by(department_id=AC_DEPT).first()
         job = Job.query.filter_by(department_id=officer.department_id).first()
-        job_title = job.job_title
         form = AddOfficerForm(first_name='A',
                               last_name='A',
                               middle_initial='A',
                               race='WHITE',
                               gender='M',
                               star_no=666,
-                              job_title=job.id,
+                              job_id=job.id,
                               department=department_id,
                               birth_year=1990,
                               links=links)
@@ -1079,7 +1490,7 @@ def test_browse_filtering_allows_good(client, mockdata, session):
         # Check that added officer appears when filtering for this race, gender, rank and age
         form = BrowseForm(race='WHITE',
                           gender='M',
-                          rank=job_title,
+                          rank=job.job_title,
                           min_age=datetime.now().year - 1991,
                           max_age=datetime.now().year - 1989)
 
@@ -1094,7 +1505,7 @@ def test_browse_filtering_allows_good(client, mockdata, session):
         assert any("<dd>White</dd>" in token for token in filter_list)
 
         filter_list = rv.data.decode('utf-8').split("<dt>Job Title</dt>")[1:]
-        assert any("<dd>{}</dd>".format(job_title) in token for token in filter_list)
+        assert any("<dd>{}</dd>".format(job.job_title) in token for token in filter_list)
 
         filter_list = rv.data.decode('utf-8').split("<dt>Gender</dt>")[1:]
         assert any("<dd>Male</dd>" in token for token in filter_list)
@@ -1455,3 +1866,295 @@ def test_get_department_ranks_with_no_department(mockdata, client, session):
         assert 'Commander' in data
 
         assert data.count('Commander') == 2  # Once for each test department
+
+
+def test_admin_can_add_link_to_officer_profile(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        admin = User.query.filter_by(email='jen@example.org').first()
+        officer = Officer.query.first()
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=admin.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_can_add_link_to_officer_profile_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_ac(client)
+        ac = User.query.filter_by(email='raq929@example.org').first()
+        officer = Officer.query.filter_by(department_id=AC_DEPT).first()
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=ac.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_cannot_add_link_to_officer_profile_not_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_ac(client)
+        ac = User.query.filter_by(email='raq929@example.org').first()
+        officer = Officer.query.except_(Officer.query.filter_by(department_id=AC_DEPT)).first()
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=ac.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 403
+
+
+def test_admin_can_edit_link_on_officer_profile(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        officer = Officer.query.filter_by(id=1).one()
+
+        assert len(officer.links) > 0
+
+        link = officer.links[0]
+        form = OfficerLinkForm(
+            title='NEW TITLE',
+            description=link.description,
+            author=link.author,
+            url=link.url,
+            link_type=link.link_type,
+            creator_id=link.creator_id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_edit', officer_id=officer.id, obj_id=link.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link successfully updated!' in rv.data.decode('utf-8')
+        assert 'NEW TITLE' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_can_edit_link_on_officer_profile_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_ac(client)
+        ac = User.query.filter_by(email='raq929@example.org').first()
+        officer = Officer.query.filter_by(department_id=AC_DEPT).first()
+
+        assert len(officer.links) == 0
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=ac.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+        link = officer.links[0]
+        form = OfficerLinkForm(
+            title='NEW TITLE',
+            description=link.description,
+            author=link.author,
+            url=link.url,
+            link_type=link.link_type,
+            creator_id=link.creator_id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_edit', officer_id=officer.id, obj_id=link.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link successfully updated!' in rv.data.decode('utf-8')
+        assert 'NEW TITLE' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_cannot_edit_link_on_officer_profile_not_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        admin = User.query.filter_by(email='jen@example.org').first()
+        officer = Officer.query.except_(Officer.query.filter_by(department_id=AC_DEPT)).all()[10]
+
+        assert len(officer.links) == 0
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=admin.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+        login_ac(client)
+
+        link = officer.links[0]
+        form = OfficerLinkForm(
+            title='NEW TITLE',
+            description=link.description,
+            author=link.author,
+            url=link.url,
+            link_type=link.link_type,
+            creator_id=link.creator_id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_edit', officer_id=officer.id, obj_id=link.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 403
+
+
+def test_admin_can_delete_link_from_officer_profile(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        officer = Officer.query.filter_by(id=1).one()
+
+        assert len(officer.links) > 0
+
+        link = officer.links[0]
+        rv = client.post(
+            url_for('main.link_api_delete', officer_id=officer.id, obj_id=link.id),
+            follow_redirects=True
+        )
+
+        assert 'link successfully deleted!' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_can_delete_link_from_officer_profile_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_ac(client)
+        ac = User.query.filter_by(email='raq929@example.org').first()
+        officer = Officer.query.filter_by(department_id=AC_DEPT).first()
+
+        assert len(officer.links) == 0
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=ac.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+        link = officer.links[0]
+        rv = client.post(
+            url_for('main.link_api_delete', officer_id=officer.id, obj_id=link.id),
+            follow_redirects=True
+        )
+
+        assert 'link successfully deleted!' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+
+def test_ac_cannot_delete_link_from_officer_profile_not_in_their_dept(mockdata, client, session):
+    with current_app.test_request_context():
+        login_admin(client)
+        admin = User.query.filter_by(email='jen@example.org').first()
+        officer = Officer.query.except_(Officer.query.filter_by(department_id=AC_DEPT)).all()[10]
+
+        assert len(officer.links) == 0
+
+        form = OfficerLinkForm(
+            title='BPD Watch',
+            description='Baltimore instance of OpenOversight',
+            author='OJB',
+            url='https://bpdwatch.com',
+            link_type='link',
+            creator_id=admin.id,
+            officer_id=officer.id)
+
+        rv = client.post(
+            url_for('main.link_api_new', officer_id=officer.id),
+            data=form.data,
+            follow_redirects=True
+        )
+
+        assert 'link created!' in rv.data.decode('utf-8')
+        assert 'BPD Watch' in rv.data.decode('utf-8')
+        assert officer.unique_internal_identifier in rv.data.decode('utf-8')
+
+        login_ac(client)
+
+        link = officer.links[0]
+        rv = client.post(
+            url_for('main.link_api_delete', officer_id=officer.id, obj_id=link.id),
+            follow_redirects=True
+        )
+
+        assert rv.status_code == 403

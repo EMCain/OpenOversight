@@ -6,7 +6,7 @@ from wtforms import (StringField, DecimalField, TextAreaField,
 from wtforms.fields.html5 import DateField
 
 from wtforms.validators import (DataRequired, InputRequired, AnyOf, NumberRange, Regexp,
-                                Length, Optional, Required, URL, ValidationError)
+                                Length, Optional, URL, ValidationError)
 from flask_wtf.file import FileField, FileAllowed, FileRequired
 
 from ..utils import unit_choices, dept_choices
@@ -27,6 +27,12 @@ def validate_money(form, field):
         raise ValidationError('Invalid monetary value')
 
 
+def validate_end_date(form, field):
+    if form.data["star_date"] and field.data:
+        if form.data["star_date"] > field.data:
+            raise ValidationError('End date must come after start date.')
+
+
 class HumintContribution(Form):
     photo = FileField(
         'image', validators=[FileRequired(message='There was no file!'),
@@ -38,14 +44,15 @@ class HumintContribution(Form):
 
 class FindOfficerForm(Form):
     name = StringField(
-        'name', default='', validators=[Regexp('\\w*'), Length(max=50),
+        'name', default='', validators=[Regexp(r'\w*'), Length(max=50),
                                         Optional()]
     )
-    badge = StringField('badge', default='', validators=[Regexp('\\w*'),
+    badge = StringField('badge', default='', validators=[Regexp(r'\w*'),
                                                          Length(max=10)])
-    unique_internal_identifier = StringField('unique_internal_identifier', default='', validators=[Regexp('\\w*'), Length(max=55)])
+    unique_internal_identifier = StringField('unique_internal_identifier', default='', validators=[Regexp(r'\w*'), Length(max=55)])
     dept = QuerySelectField('dept', validators=[DataRequired()],
                             query_factory=dept_choices, get_label='name')
+    unit = StringField('unit', default='Not Sure', validators=[Optional()])
     rank = StringField('rank', default='Not Sure', validators=[Optional()])  # Gets rewritten by Javascript
     race = SelectField('race', default='Not Sure', choices=RACE_CHOICES,
                        validators=[AnyOf(allowed_values(RACE_CHOICES))])
@@ -68,11 +75,11 @@ class FindOfficerForm(Form):
 class FindOfficerIDForm(Form):
     name = StringField(
         'name', default='', validators=[
-            Regexp('\\w*'), Length(max=50), Optional()
+            Regexp(r'\w*'), Length(max=50), Optional()
         ]
     )
     badge = StringField(
-        'badge', default='', validators=[Regexp('\\w*'), Length(max=10)]
+        'badge', default='', validators=[Regexp(r'\w*'), Length(max=10)]
     )
     dept = QuerySelectField('dept', validators=[Optional()],
                             query_factory=dept_choices, get_label='name')
@@ -89,13 +96,14 @@ class FaceTag(Form):
 
 class AssignmentForm(Form):
     star_no = StringField('Badge Number', default='', validators=[
-        Regexp('\\w*'), Length(max=50)])
-    job_title = QuerySelectField('job_title', validators=[Required()],
+        Regexp(r'\w*'), Length(max=50)])
+    job_title = QuerySelectField('Job Title', validators=[DataRequired()],
                                  get_label='job_title', get_pk=lambda x: x.id)  # query set in view function
     unit = QuerySelectField('Unit', validators=[Optional()],
                             query_factory=unit_choices, get_label='descrip',
                             allow_blank=True, blank_text=u'None')
     star_date = DateField('Assignment start date', validators=[Optional()])
+    resign_date = DateField('Assignment end date', validators=[Optional(), validate_end_date])
 
 
 class SalaryForm(Form):
@@ -122,14 +130,14 @@ class SalaryForm(Form):
 class DepartmentForm(Form):
     name = StringField(
         'Full name of law enforcement agency, e.g. Chicago Police Department',
-        default='', validators=[Regexp('\\w*'), Length(max=255), DataRequired()]
+        default='', validators=[Regexp(r'\w*'), Length(max=255), DataRequired()]
     )
     short_name = StringField(
         'Shortened acronym for law enforcement agency, e.g. CPD',
-        default='', validators=[Regexp('\\w*'), Length(max=100), DataRequired()]
+        default='', validators=[Regexp(r'\w*'), Length(max=100), DataRequired()]
     )
     jobs = FieldList(StringField('Job', default='', validators=[
-        Regexp('\\w*')]), label='Ranks')
+        Regexp(r'\w*')]), label='Ranks')
     submit = SubmitField(label='Add')
 
 
@@ -153,7 +161,7 @@ class LinkForm(Form):
         choices=LINK_CHOICES,
         default='',
         validators=[AnyOf(allowed_values(LINK_CHOICES))])
-    user_id = HiddenField(validators=[Required(message='Not a valid user ID')])
+    creator_id = HiddenField(validators=[DataRequired(message='Not a valid user ID')])
 
     def validate(self):
         success = super(LinkForm, self).validate()
@@ -163,6 +171,11 @@ class LinkForm(Form):
             success = False
 
         return success
+
+
+class OfficerLinkForm(LinkForm):
+    officer_id = HiddenField(validators=[DataRequired(message='Not a valid officer ID')])
+    submit = SubmitField(label='Submit')
 
 
 class BaseTextForm(Form):
@@ -175,19 +188,19 @@ class EditTextForm(BaseTextForm):
 
 
 class TextForm(EditTextForm):
-    officer_id = HiddenField(validators=[Required(message='Not a valid officer ID')])
-    creator_id = HiddenField(validators=[Required(message='Not a valid user ID')])
+    officer_id = HiddenField(validators=[DataRequired(message='Not a valid officer ID')])
+    creator_id = HiddenField(validators=[DataRequired(message='Not a valid user ID')])
 
 
 class AddOfficerForm(Form):
     department = QuerySelectField('Department', validators=[DataRequired()],
                                   query_factory=dept_choices, get_label='name')
     first_name = StringField('First name', default='', validators=[
-        Regexp('\\w*'), Length(max=50), Optional()])
+        Regexp(r'\w*'), Length(max=50), Optional()])
     last_name = StringField('Last name', default='', validators=[
-        Regexp('\\w*'), Length(max=50), DataRequired()])
+        Regexp(r'\w*'), Length(max=50), DataRequired()])
     middle_initial = StringField('Middle initial', default='', validators=[
-        Regexp('\\w*'), Length(max=50), Optional()])
+        Regexp(r'\w*'), Length(max=50), Optional()])
     suffix = SelectField('Suffix', default='', choices=SUFFIX_CHOICES,
                          validators=[AnyOf(allowed_values(SUFFIX_CHOICES))])
     race = SelectField('Race', default='WHITE', choices=RACE_CHOICES,
@@ -195,9 +208,9 @@ class AddOfficerForm(Form):
     gender = SelectField('Gender', default='M', choices=GENDER_CHOICES,
                          validators=[AnyOf(allowed_values(GENDER_CHOICES))])
     star_no = StringField('Badge Number', default='', validators=[
-        Regexp('\\w*'), Length(max=50)])
-    unique_internal_identifier = StringField('Unique Internal Identifier', default='', validators=[Regexp('\\w*'), Length(max=50)])
-    job_title = StringField('Job Title')  # Gets rewritten by Javascript
+        Regexp(r'\w*'), Length(max=50)])
+    unique_internal_identifier = StringField('Unique Internal Identifier', default='', validators=[Regexp(r'\w*'), Length(max=50)])
+    job_id = StringField('Job ID')  # Gets rewritten by Javascript
     unit = QuerySelectField('Unit', validators=[Optional()],
                             query_factory=unit_choices, get_label='descrip',
                             allow_blank=True, blank_text=u'None')
@@ -233,13 +246,13 @@ class AddOfficerForm(Form):
 
 class EditOfficerForm(Form):
     first_name = StringField('First name',
-                             validators=[Regexp('\\w*'), Length(max=50),
+                             validators=[Regexp(r'\w*'), Length(max=50),
                                          Optional()])
     last_name = StringField('Last name',
-                            validators=[Regexp('\\w*'), Length(max=50),
+                            validators=[Regexp(r'\w*'), Length(max=50),
                                         DataRequired()])
     middle_initial = StringField('Middle initial',
-                                 validators=[Regexp('\\w*'), Length(max=50),
+                                 validators=[Regexp(r'\w*'), Length(max=50),
                                              Optional()])
     suffix = SelectField('Suffix', choices=SUFFIX_CHOICES, default='',
                          validators=[AnyOf(allowed_values(SUFFIX_CHOICES))])
@@ -251,28 +264,22 @@ class EditOfficerForm(Form):
     birth_year = IntegerField('Birth Year', validators=[Optional()])
     unique_internal_identifier = StringField('Unique Internal Identifier',
                                              default='',
-                                             validators=[Regexp('\\w*'), Length(max=50)],
+                                             validators=[Regexp(r'\w*'), Length(max=50)],
                                              filters=[lambda x: x or None])
     department = QuerySelectField(
         'Department',
         validators=[Optional()],
         query_factory=dept_choices,
         get_label='name')
-    links = FieldList(FormField(
-        LinkForm,
-        widget=FormFieldWidget()),
-        description='Links to articles about or videos of the officer.',
-        min_entries=1,
-        widget=BootstrapListWidget())
     submit = SubmitField(label='Update')
 
 
 class AddUnitForm(Form):
     descrip = StringField('Unit name or description', default='', validators=[
-        Regexp('\\w*'), Length(max=120), DataRequired()])
+        Regexp(r'\w*'), Length(max=120), DataRequired()])
     department = QuerySelectField(
         'Department',
-        validators=[Required()],
+        validators=[DataRequired()],
         query_factory=dept_choices,
         get_label='name')
     submit = SubmitField(label='Add')
@@ -281,13 +288,13 @@ class AddUnitForm(Form):
 class AddImageForm(Form):
     department = QuerySelectField(
         'Department',
-        validators=[Required()],
+        validators=[DataRequired()],
         query_factory=dept_choices,
         get_label='name')
 
 
 class DateFieldForm(Form):
-    date_field = DateField('Date <span class="text-danger">*</span>', validators=[Required()])
+    date_field = DateField('Date*', validators=[DataRequired()])
     time_field = TimeField('Time', validators=[Optional()])
 
     def validate_time_field(self, field):
@@ -303,12 +310,12 @@ class LocationForm(Form):
     street_name = StringField(validators=[Optional()], description='Street on which incident occurred. For privacy reasons, please DO NOT INCLUDE street number.')
     cross_street1 = StringField(validators=[Optional()], description='Closest cross street to where incident occurred.')
     cross_street2 = StringField(validators=[Optional()])
-    city = StringField('City <span class="text-danger">*</span>', validators=[Required()])
-    state = SelectField('State <span class="text-danger">*</span>', choices=STATE_CHOICES,
+    city = StringField('City*', validators=[DataRequired()])
+    state = SelectField('State*', choices=STATE_CHOICES,
                         validators=[AnyOf(allowed_values(STATE_CHOICES, False), message='Must select a state.')])
     zip_code = StringField('Zip Code',
                            validators=[Optional(),
-                                       Regexp('^\\d{5}$', message='Zip codes must have 5 digits.')])
+                                       Regexp(r'^\d{5}$', message='Zip codes must have 5 digits.')])
 
 
 class LicensePlateForm(Form):
@@ -354,8 +361,8 @@ class IncidentForm(DateFieldForm):
         description='Incident number for the organization tracking incidents')
     description = TextAreaField(validators=[Optional()])
     department = QuerySelectField(
-        'Department <span class="text-danger">*</span>',
-        validators=[Required()],
+        'Department*',
+        validators=[DataRequired()],
         query_factory=dept_choices,
         get_label='name')
     address = FormField(LocationForm)
@@ -375,8 +382,8 @@ class IncidentForm(DateFieldForm):
         description='Links to articles about or videos of the incident.',
         min_entries=1,
         widget=BootstrapListWidget())
-    creator_id = HiddenField(validators=[Required(message='Incidents must have a creator id.')])
-    last_updated_id = HiddenField(validators=[Required(message='Incidents must have a user id for editing.')])
+    creator_id = HiddenField(validators=[DataRequired(message='Incidents must have a creator id.')])
+    last_updated_id = HiddenField(validators=[DataRequired(message='Incidents must have a user id for editing.')])
 
     submit = SubmitField(label='Submit')
 
